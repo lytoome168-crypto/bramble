@@ -6,8 +6,8 @@ export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 export const startLogin = () => {
   const authWindow = window.open("/api/oauth/github/start", "_blank", "noopener,noreferrer");
   if (!authWindow) {
-    // Popup blockers may prevent a new tab; this fallback still works when the
-    // app is opened as a standalone page rather than inside Preview.
-    window.top?.location.assign("/api/oauth/github/start");
+    // Popup blockers may prevent a new tab. This same-window fallback avoids
+    // touching the cross-origin parent frame, which browsers forbid.
+    window.location.assign("/api/oauth/github/start");
   }
 };
