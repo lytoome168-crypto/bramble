@@ -2,7 +2,6 @@ import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
 import { registerGitHubOAuthRoutes } from "./githubOAuth";
 import { publicPlatformScript } from "./publicConfig";
 import { appRouter } from "../routers";
@@ -21,9 +20,6 @@ async function startServer() {
     res.set("Cache-Control", "no-store").type("application/javascript").send(publicPlatformScript());
   });
   registerGitHubOAuthRoutes(app);
-  // Keep the platform route available for existing sessions and scheduled
-  // identities, but the application UI now starts GitHub login exclusively.
-  registerOAuthRoutes(app);
   registerScheduledDigest(app);
   // tRPC API
   app.use(

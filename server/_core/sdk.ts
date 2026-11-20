@@ -291,6 +291,10 @@ class SDKServer {
       return buildCronUser(userInfo);
     }
 
+    if (!session.openId.startsWith("github:")) {
+      throw ForbiddenError("GitHub login required");
+    }
+
     const sessionUserId = session.openId;
     const signedInAt = new Date();
     let user = await db.getUserByOpenId(sessionUserId);
