@@ -12,6 +12,7 @@ const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_API_URL = "https://api.github.com";
 const STATE_MAX_AGE_SECONDS = 600;
+const STATE_SEPARATOR = ".";
 
 type GitHubUser = {
   id: number;
@@ -24,6 +25,12 @@ type GitHubEmail = {
   email: string;
   primary: boolean;
   verified: boolean;
+};
+
+type GitHubStatePayload = {
+  nonce: string;
+  issuedAt: number;
+  redirectUri: string;
 };
 
 function publicOrigin(req: Request): string {
@@ -61,6 +68,44 @@ function requireClientCredentials(): { clientId: string; clientSecret: string } 
     throw new Error("GitHub OAuth credentials are not configured");
   }
   return { clientId: ENV.githubClientId, clientSecret: ENV.githubClientSecret };
+}
+
+function stateSecret(): Uint8Array {
+  if (!ENV.cookieSecret) throw new Error("MANUS_JWT_SECRET is unavailable");
+  return new TextEncoder().encode(ENV.cookieSecret);
+}
+
+function encodeBase64Url(value: string | Uint8Array): string {
+  const bytes = typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value);
+  return bytes.toString("base64url");
+}
+
+function decodeBase64Url(value: string): string {
+  return Buffer.from(value, "base64url").toString("utf8");
+}
+
+function createSignedState(payload: GitHubStatePayload): string {
+  const encodedPayload = encodeBase64Url(JSON.stringify(payload));
+  const signature = crypto.createHmac("sha256", stateSecret()).update(encodedPayload).digest();
+  return `${encodedPayload}${STATE_SEPARATOR}${encodeBase64Url(signature)}`;
+}
+
+function verifySignedState(state: string, expectedRedirectUri: string): GitHubStatePayload | null {
+  const [encodedPayload, encodedSignature] = state.split(STATE_SEPARATOR);
+  if (!encodedPayload || !encodedSignature) return null;
+  const expectedSignature = crypto.createHmac("sha256", stateSecret()).update(encodedPayload).digest();
+  if (!safeEqual(encodedSignature, encodeBase64Url(expectedSignature))) return null;
+
+  try {
+    const payload = JSON.parse(decodeBase64Url(encodedPayload)) as Partial<GitHubStatePayload>;
+    if (typeof payload.nonce !== "string" || typeof payload.issuedAt !== "number" || typeof payload.redirectUri !== "string") return null;
+    if (payload.redirectUri !== expectedRedirectUri) return null;
+    const now = Date.now();
+    if (now - payload.issuedAt > STATE_MAX_AGE_SECONDS * 1000 || payload.issuedAt > now + 30_000) return null;
+    return payload as GitHubStatePayload;
+  } catch {
+    return null;
+  }
 }
 
 async function githubJson<T>(url: string, init: RequestInit): Promise<T> {
@@ -112,8 +157,12 @@ export function registerGitHubOAuthRoutes(app: Express) {
   app.get("/api/oauth/github/start", (req: Request, res: Response) => {
     try {
       const { clientId } = requireClientCredentials();
-      const state = crypto.randomBytes(32).toString("hex");
       const redirectUri = callbackUrl(req);
+      const state = createSignedState({
+        nonce: crypto.randomBytes(32).toString("hex"),
+        issuedAt: Date.now(),
+        redirectUri,
+      });
       res.cookie(GITHUB_STATE_COOKIE, state, stateCookieOptions());
 
       const url = new URL(GITHUB_AUTHORIZE_URL);
@@ -139,13 +188,17 @@ export function registerGitHubOAuthRoutes(app: Express) {
       res.redirect(302, "/?auth_error=github_cancelled");
       return;
     }
-    if (!code || !safeEqual(state, expectedState)) {
+    const redirectUri = callbackUrl(req);
+    const signedState = state ? verifySignedState(state, redirectUri) : null;
+    // Preview may partition or omit the state cookie when the OAuth callback
+    // returns from GitHub. The signed, short-lived state remains verifiable;
+    // when the cookie is present, require it to match as an extra CSRF check.
+    if (!code || !signedState || (expectedState && !safeEqual(state, expectedState))) {
       res.status(403).json({ error: "invalid github oauth state" });
       return;
     }
 
     try {
-      const redirectUri = callbackUrl(req);
       const accessToken = await exchangeCode(code, redirectUri);
       const identity = await getGitHubIdentity(accessToken);
       const openId = `github:${identity.id}`;
